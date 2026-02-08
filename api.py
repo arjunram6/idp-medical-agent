@@ -50,8 +50,19 @@ class QueryResponse(BaseModel):
 
 
 class ChatMessageRequest(BaseModel):
-    message: str = Field(..., min_length=1)
+    message: str | None = Field(None, min_length=1)
+    query: str | None = Field(None, min_length=1)
     session_id: str | None = None  # optional; frontend can manage session
+
+    @staticmethod
+    def _pick_message(message: str | None, query: str | None) -> str | None:
+        return (message or "").strip() or (query or "").strip() or None
+
+    def get_message(self) -> str:
+        msg = self._pick_message(self.message, self.query)
+        if not msg:
+            raise ValueError("Chat message must not be empty.")
+        return msg
 
 
 class ChatMessageResponse(BaseModel):
@@ -122,7 +133,7 @@ def query_legacy(req: QueryRequest):
 def chat(req: ChatMessageRequest):
     """One chat turn. Frontend can send each user message here; optional session_id for server-side history (not required)."""
     try:
-        reply, intent, sub_agent, _ = _run_query(req.message)
+        reply, intent, sub_agent, _ = _run_query(req.get_message())
         return ChatMessageResponse(reply=reply, intent=intent, sub_agent=sub_agent)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -181,6 +192,11 @@ def regions_summary() -> dict[str, Any]:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Regions summary error: {e}")
+
+
+@app.get("/regions/summary")
+def regions_summary_legacy() -> dict[str, Any]:
+    return regions_summary()
 
 
 if __name__ == "__main__":
