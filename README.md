@@ -63,31 +63,12 @@ Base URL: `http://localhost:8000`
 - `GET /api/health`
 - `GET /health` (legacy alias)
 
-### Query (single-turn)
-- `POST /api/query`
-- `POST /query` (legacy alias)
-
-Body:
-```json
-{ "query": "Which regions lack dialysis?" }
-```
-
-Response:
-```json
-{
-  "answer": "...",
-  "intent": "local_facility_query",
-  "sub_agent": "local_csv",
-  "used_medical_reasoning": false
-}
-```
-
-### Chat (single-turn, UI-friendly)
+### Chat
 - `POST /api/chat`
 
 Body:
 ```json
-{ "message": "How many hospitals in Accra have emergency care?" }
+{ "message": "Which regions lack dialysis?" }
 ```
 
 Response:
@@ -98,6 +79,10 @@ Response:
   "sub_agent": "local_csv"
 }
 ```
+
+### Query (legacy, avoid in frontend)
+- `POST /api/query`
+- `POST /query` (legacy alias)
 
 ### Guided options
 - `GET /api/guided-options`
@@ -115,7 +100,7 @@ Body:
 { "query": "Which regions lack dialysis?" }
 ```
 
-### Regional capabilities summary
+### Regional capabilities summary (optional legacy)
 - `GET /api/regions/summary`
 
 Response:

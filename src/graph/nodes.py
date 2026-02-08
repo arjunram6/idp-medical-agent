@@ -179,7 +179,62 @@ def reason_over_data(state: AgentState) -> AgentState:
         return {"gaps": gaps[:15], "reasoning": reasoning, "step_traces": traces}
 
     if route == "deserts":
-        reasoning.append("Desert analysis from regional synthesis.")
+        # Desert analysis: regions with no capability and no facility within 20 km
+        query_lower = query.lower()
+        stop = {"which", "where", "what", "have", "with", "lack", "lacking", "without", "no", "the", "and", "for", "within", "km", "care"}
+        words = [w for w in query_lower.split() if len(w) > 3 and w not in stop]
+        capability_label = " ".join(words) if words else query
+        deserts: list[dict[str, Any]] = []
+
+        # 1) Regions with zero facilities for a capability (from synthesis)
+        by_region = synthesis.get("by_region") or {}
+        for region, data in by_region.items():
+            procs = " ".join(data.get("procedures", [])).lower()
+            caps = " ".join(data.get("capabilities", [])).lower()
+            combined = (procs + " " + caps).strip()
+            if not combined:
+                deserts.append({"region": region, "missing_capability": capability_label, "facilities_with_capability_elsewhere": []})
+            elif words and not any(w in combined for w in words):
+                deserts.append({"region": region, "missing_capability": capability_label, "facilities_with_capability_elsewhere": data.get("facilities", [])[:5]})
+
+        # 2) Regions with no facility within 20 km (geodesic distance), when coords exist
+        try:
+            from query_local import load_csv, search_rows
+            from src.geo import haversine_km, get_row_coords
+            _name, rows = load_csv(prefer_geocoded=True)
+            cap_rows = search_rows(rows, words or [capability_label], facility_type=None, query=query)
+            cap_coords = [get_row_coords(r) for r in cap_rows]
+            cap_coords = [c for c in cap_coords if c]
+            if cap_coords:
+                # group facility coords by region
+                region_coords: dict[str, list[tuple[float, float]]] = {}
+                for r in rows:
+                    coord = get_row_coords(r)
+                    if not coord:
+                        continue
+                    region = (r.get("address_stateOrRegion") or r.get("address_city") or "Unknown").strip() or "Unknown"
+                    region_coords.setdefault(region, []).append(coord)
+                for region, coords in region_coords.items():
+                    # if no coord is within 20 km of any capability facility, mark desert
+                    within = False
+                    for c in coords:
+                        if any(haversine_km(c[0], c[1], cc[0], cc[1]) <= 20.0 for cc in cap_coords):
+                            within = True
+                            break
+                    if not within:
+                        deserts.append({"region": region, "missing_capability": f"{capability_label} within 20 km", "facilities_with_capability_elsewhere": []})
+        except Exception:
+            pass
+
+        reasoning.append("Computed medical desert regions (zero capability or no facility within 20 km).")
+        traces = append_step_trace(
+            state.get("step_traces") or [],
+            step_id=7,
+            step_name="reason",
+            citation_refs=refs,
+            outputs_summary=f"{len(deserts)} deserts",
+        )
+        return {"gaps": deserts[:15], "reasoning": reasoning, "step_traces": traces}
     else:
         reasoning.append("RAG: using retrieved facilities and synthesis as evidence.")
     traces = append_step_trace(

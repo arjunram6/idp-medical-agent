@@ -11,6 +11,7 @@ import csv
 import io
 import re
 import sys
+from typing import Any
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -119,6 +120,40 @@ def search_rows(
 EMPTY_LABEL = "N/A"
 
 
+def _rank_facilities(rows: list[dict], limit: int = 5, prefer_hospitals: bool = False) -> tuple[list[tuple[dict, Any]], int]:
+    """Return top facilities ranked by documentation quality (risk_score)."""
+    if not rows:
+        return [], 0
+    filtered = rows
+    if prefer_hospitals:
+        hospitals = [r for r in rows if (r.get("facilityTypeId") or "").strip().lower() == "hospital"]
+        filtered = hospitals or rows
+    try:
+        from src.risk_rating import compute_risk
+    except Exception:
+        return [], 0
+    results = [(r, compute_risk(r)) for r in filtered]
+    results.sort(key=lambda x: (-x[1].risk_score, (x[0].get("name") or "")))
+    top = results[:limit]
+    remaining = max(0, len(results) - len(top))
+    return top, remaining
+
+
+def _print_ranked_list(pr, rows: list[dict], label: str, limit: int = 5, prefer_hospitals: bool = False) -> None:
+    """Print ranked facility list with Trust/Risk factors."""
+    top, remaining = _rank_facilities(rows, limit=limit, prefer_hospitals=prefer_hospitals)
+    if not top:
+        pr("No facilities found.")
+        return
+    pr(label)
+    for r, res in top:
+        nm = (r.get("name") or "Unknown").strip()
+        gaps = ", ".join(s.title() for s in res.critical_missing) or "None"
+        pr(f"  - {nm} — Trust Factor: {res.tier} | Risk Factor: {res.risk_band} | Key gaps: {gaps}")
+    if remaining > 0:
+        pr(f"  ... and {remaining} more options.")
+
+
 def find_facility_by_name(rows: list[dict], facility_name: str) -> dict | None:
     """Find first row where name contains facility_name (case-insensitive)."""
     name_lower = facility_name.lower().strip()
@@ -137,18 +172,47 @@ def find_facility_by_name(rows: list[dict], facility_name: str) -> dict | None:
 
 def format_services(row: dict) -> str:
     """Format facility services; use N/A for empty fields."""
+    def _parse_list_value(v: str) -> list[str] | None:
+        raw = (v or "").strip()
+        if not raw or raw in ("null", "[]"):
+            return None
+        if not (raw.startswith("[") and raw.endswith("]")):
+            return None
+        try:
+            import json
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+        try:
+            import ast
+            parsed = ast.literal_eval(raw)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            return None
+        return None
+
     def _val(key: str, max_len: int = 1200) -> str:
         v = (row.get(key) or "").strip()
         if not v or v in ("null", "[]"):
             return EMPTY_LABEL
         return v[:max_len] + ("..." if len(v) > max_len else "")
 
+    def _pretty_field(key: str, max_len: int) -> str:
+        v = (row.get(key) or "").strip()
+        items = _parse_list_value(v)
+        if items:
+            return "\n".join(f"- {i}" for i in items)
+        return _val(key, max_len)
+
     lines = [
         "**Description:** " + _val("description", 1500),
-        "**Capability:** " + _val("capability", 800),
-        "**Procedure:** " + _val("procedure", 800),
-        "**Equipment:** " + _val("equipment", 600),
-        "**Specialties:** " + _val("specialties", 500),
+        "**Capabilities:**\n" + _pretty_field("capability", 800),
+        "**Procedures:**\n" + _pretty_field("procedure", 800),
+        "**Equipment:**\n" + _pretty_field("equipment", 600),
+        "**Specialties:**\n" + _pretty_field("specialties", 500),
     ]
     return "\n".join(lines)
 
@@ -539,17 +603,23 @@ def run_query(query: str, out: io.TextIOBase | None = None) -> str:
 
 def _main_body(query: str, out: io.TextIOBase) -> None:
     """Core logic: load CSV, dispatch by query type, write answer to out."""
-    def pr(*args, **kwargs):
-        print(*args, file=out, **kwargs)
+    def _fix_case(text: str) -> str:
+        if not text:
+            return text
+        first = text[0]
+        if first.isalpha() and first.islower():
+            return first.upper() + text[1:]
+        return text
 
-    pr("Query:", query, "\n")
+    def pr(*args, **kwargs):
+        if args and isinstance(args[0], str):
+            args = (_fix_case(args[0]),) + args[1:]
+        print(*args, file=out, **kwargs)
 
     name, rows = load_csv()
     if not rows:
         pr("No Ghana CSV found in data/ or Desktop.")
         return
-
-    pr(f"Data: {name} ({len(rows)} rows)\n")
 
     # "Identify the N highest-risk [capability] facilities in [region]; explain reasoning; recommend additional data"
     parsed = parse_highest_risk_in_region_query(query)
@@ -573,32 +643,34 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
             return
         # Step 3: Compute risk for each (citation: risk_rating weights)
         step3 = [(r, compute_risk(r)) for r in step2_rows]
-        pr(f"\n**Step 3 (risk scoring)** — *Citation: used risk_rating (0–100; critical/moderate/low weights: contact, facility type, specialties, location, capability, operator, procedures, address).*")
-        pr(f"  Computed risk score for each of the **{len(step3)}** facilities.")
-        # Step 4: Rank by risk (lowest score = highest risk), take top N
+        pr(f"\n**Step 3 (risk scoring)** — *Citation: used risk_rating (weights: contact, facility type, specialties, location, capability, operator, procedures, address).*")
+        pr(f"  Computed documentation quality for each of the **{len(step3)}** facilities.")
+        # Step 4: Rank by documentation (lowest documentation = highest risk), take top N
         step4 = sorted(step3, key=lambda x: x[1].risk_score)[:n]
-        pr(f"\n**Step 4 (ranking)** — *Citation: sorted by `risk_score` ascending; took top **{n}** (highest risk = lowest score).*")
+        pr(f"\n**Step 4 (ranking)** — *Citation: sorted by documentation quality; took top **{n}** (highest risk = lowest documentation).*")
         pr(f"\n--- **Top {n} highest-risk {capability_keywords[0]} facilities in {region_name}** ---\n")
         all_critical = []
         all_moderate = []
         for i, (row, res) in enumerate(step4, 1):
             pr(f"**{i}. {(row.get('name') or 'Unknown').strip()}**")
-            pr(f"   Risk score: **{res.risk_score}** (band: {res.risk_band}, tier: {res.tier})")
-            pr(f"   Critical missing: {', '.join(res.critical_missing) or 'none'}")
-            pr(f"   Moderate missing: {', '.join(res.moderate_missing) or 'none'}")
+            pr(f"   Trust Factor: **{res.tier}**  |  Risk Factor: **{res.risk_band}**")
+            key_gaps = ", ".join(s.title() for s in res.critical_missing) or "None"
+            pr(f"   Key gaps: {key_gaps}")
+            extra_gaps = ", ".join(s.title() for s in res.moderate_missing) or "None"
+            pr(f"   Additional gaps: {extra_gaps}")
             all_critical.extend(res.critical_missing)
             all_moderate.extend(res.moderate_missing)
             pr("")
         # Reasoning
         pr("**Reasoning:**")
         pr(f"  We restricted to **{region_name}** (Step 1), then to facilities that list **{capability_keywords[0]}**-related services (Step 2).")
-        pr(f"  Risk scores (0–100, lower = higher verification risk) were computed from contact info, facility type, specialties, location, capability, operator type, procedures/equipment, and address completeness (Step 3).")
-        pr(f"  The **{n}** facilities with the **lowest** scores are the highest-risk; they have the most critical/moderate gaps (e.g. no contact, unknown facility type, missing specialties or location).")
+        pr(f"  Documentation quality was computed from contact info, facility type, specialties, location, capability, operator type, procedures/equipment, and address completeness (Step 3).")
+        pr(f"  The **{n}** facilities with the **lowest** documentation are the highest-risk; they have the most critical/moderate gaps (e.g. no contact, unknown facility type, missing specialties or location).")
         # Recommendation: additional data that would reduce risk most
         from collections import Counter
         crit = Counter(all_critical)
         mod = Counter(all_moderate)
-        pr("\n**Recommendation — additional data that would reduce their risk scores the most:**")
+        pr("\n**Recommendation — additional data that would reduce risk the most:**")
         if crit:
             top_crit = [k for k, _ in crit.most_common(4)]
             pr(f"  - **Critical:** Collect and add **{', '.join(top_crit)}** for these facilities. Each missing critical field costs 12 points; adding contact, facility type, specialties, or location would raise scores the most.")
@@ -615,14 +687,13 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
         from src.risk_rating import compute_risk_all, risk_summary
         results = compute_risk_all(rows)
         summary = risk_summary(rows)
-        pr("**Risk rating** (0–100 scale; higher = better documented, lower risk)")
-        pr("- **0–30** = High Risk (Red) — major verification concerns")
-        pr("- **31–60** = Medium Risk (Yellow) — some gaps but usable")
-        pr("- **61–100** = Low Risk (Green) — well-documented")
+        pr("**Risk rating**")
+        pr("- **Trust Factor**: A (best documented) → D (largest gaps)")
+        pr("- **Risk Factor**: Low / Medium / High (data completeness risk)")
         pr("")
         pr("**Summary**")
         pr(f"  Facilities: **{summary['total_facilities']}**")
-        pr(f"  Avg risk score: **{summary['avg_risk_score']}**  |  Avg data completeness: **{summary['avg_completeness_score']}%**")
+        pr(f"  Avg data completeness: **{summary['avg_completeness_score']}%**")
         pr("  By risk band:", summary["by_risk_band"])
         pr("  By tier (A=best → D=critical gaps):", summary["by_tier"])
         subset = []
@@ -636,8 +707,8 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
             label = {"high_risk": "High Risk (Red)", "tier_d": "Tier D", "tier_c": "Tier C"}.get(risk_type, "list")
             pr(f"\n**Facilities: {label}** ({len(subset)}):")
             for row, res in sorted(subset, key=lambda x: x[1].risk_score)[:30]:
-                missing = ", ".join(res.critical_missing[:3]) + ("..." if len(res.critical_missing) > 3 else "")
-                pr(f"  - {(row.get('name') or 'Unknown')[:50]} (score={res.risk_score}, tier={res.tier}, missing: {missing})")
+                missing = ", ".join(s.title() for s in res.critical_missing[:3]) + ("..." if len(res.critical_missing) > 3 else "")
+                pr(f"  - {(row.get('name') or 'Unknown')[:50]} (Trust Factor: {res.tier}, Risk Factor: {res.risk_band}, Key gaps: {missing or 'None'})")
             if len(subset) > 30:
                 pr(f"  ... and {len(subset) - 30} more.")
         elif risk_type in ("high_risk", "tier_d", "tier_c"):
@@ -692,7 +763,7 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
         if row:
             pr("**" + (row.get("name") or "Facility") + "**\n")
             pr(format_services(row))
-            pr("\n" + explain_relevant_terms(["description", "capability", "procedure", "equipment", "specialties"]))
+            # Terminology block removed for cleaner user-facing responses
         else:
             pr("No facility found matching \"" + facility_name + "\".")
         return
@@ -703,18 +774,12 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
         care_keywords, place_name = care_near
         matches = search_rows(rows, care_keywords, facility_type=None, query=query)
         in_place = [r for r in matches if in_place_city(r, place_name)]
-        unique_names = list(dict.fromkeys((r.get("name") or "Unknown").strip() for r in in_place))
         pr("**Answer**")
-        pr(f"Facilities for **{care_keywords[0]}** care in **{place_name.title()}**: **{len(in_place)}** (unique names: **{len(unique_names)}**).")
-        if unique_names:
-            pr("\nYou can consider:")
-            for n in unique_names[:15]:
-                pr(f"  - {n}")
-            if len(unique_names) > 15:
-                pr(f"  ... and {len(unique_names) - 15} more.")
+        if in_place:
+            pr(f"Top hospitals for **{care_keywords[0]}** care in **{place_name.title()}** (ranked by documentation quality):")
+            _print_ranked_list(pr, in_place, "", limit=5, prefer_hospitals=True)
         else:
-            pr("\nNo facilities with that type of care found in that location in the dataset. Try a nearby city or a broader search.")
-        pr("\n(Based on specialties, procedure, capability, and description; location from address_city / address_stateOrRegion.)")
+            pr("No facilities with that type of care found in that location in the dataset. Try a nearby city or a broader search.")
         return
 
     # "Where is/are X practicing?" -> facilities with that specialty, grouped by location
@@ -736,15 +801,12 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
             by_region.setdefault(loc, []).append(r)
         for loc in by_region:
             by_region[loc] = sort_rows_by_richness_then_similarity(by_region[loc], query)
-        unique_names = list(dict.fromkeys(n for r in matches for n in [(r.get("name") or "Unknown").strip()]))
         pr("**Answer**")
-        pr(f"Facilities offering **{', '.join(where_kw)}** in Ghana: **{len(matches)}** (unique names: **{len(unique_names)}**).")
-        pr("\n**By location (city / region):**")
-        for loc in sorted(by_region.keys(), key=lambda x: (-len(by_region[x]), x)):
-            row_list = by_region[loc]
-            names = list(dict.fromkeys((r.get("name") or "Unknown").strip() for r in row_list))[:10]
-            pr(f"  - **{loc}**: {', '.join(names)}{' ...' if len(row_list) > 10 else ''}")
-        pr("\n" + explain_relevant_terms(["specialties", "address_city", "address_stateOrRegion"]))
+        pr(f"Facilities offering **{', '.join(where_kw)}** in Ghana: **{len(matches)}**.")
+        if matches:
+            pr("\nTop facilities (ranked by documentation quality):")
+            _print_ranked_list(pr, matches, "", limit=5, prefer_hospitals=False)
+        # Terminology block removed for cleaner user-facing responses
         return
 
     # "Which facilities claim to offer X but lack Y?" (e.g. surgery but lack equipment)
@@ -754,15 +816,11 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
         claimers = [r for r in rows if _row_claims_service(r, claim_kw)]
         missing = [r for r in claimers if not _row_has_equipment(r, lack_kw)]
         missing = sort_rows_by_richness_then_similarity(missing, query)
-        unique_names = list(dict.fromkeys((r.get("name") or "Unknown").strip() for r in missing))
         pr("**Answer**")
-        pr(f"Facilities that **mention {', '.join(claim_kw)}** but **do not list** basic required terms ({', '.join(lack_kw[:5])}{'...' if len(lack_kw) > 5 else ''}) in equipment/capability/procedure: **{len(missing)}** (unique names: **{len(unique_names)}**).")
-        if unique_names:
-            pr("\nExamples:")
-            for n in unique_names[:20]:
-                pr(f"  - {n}")
-            if len(unique_names) > 20:
-                pr(f"  ... and {len(unique_names) - 20} more.")
+        pr(f"Facilities that **mention {', '.join(claim_kw)}** but **do not list** basic required terms ({', '.join(lack_kw[:5])}{'...' if len(lack_kw) > 5 else ''}) in equipment/capability/procedure: **{len(missing)}**.")
+        if missing:
+            pr("\nTop facilities (ranked by documentation quality):")
+            _print_ranked_list(pr, missing, "", limit=5, prefer_hospitals=False)
         else:
             pr("\nNo such facilities found in the dataset (or all facilities that mention the service also list relevant equipment).")
         pr("\n(Based on procedure, capability, description, specialties for “claim”; equipment, capability, procedure for “has equipment”.)")
@@ -845,13 +903,11 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
         ft_id = ft_map.get(ft_id, ft_id)
         candidates = search_rows(rows, cap_keywords, facility_type=ft_id, query=query)
         in_place_rows = sort_rows_by_richness_then_similarity([r for r in candidates if in_place_city(r, place_name)], query)
-        unique_names = list(dict.fromkeys((r.get("name") or "Unknown").strip() for r in in_place_rows))
         pr("**Answer**")
         if in_place_rows:
-            pr(f"Yes. **{len(in_place_rows)}** {ft_id}(s) in **{place_name.title()}** that mention **{', '.join(cap_keywords[:3])}** (unique names: **{len(unique_names)}**).")
-            pr("\nExamples:", ", ".join(unique_names[:15]))
-            if len(unique_names) > 15:
-                pr("... and", len(unique_names) - 15, "more.")
+            pr(f"Yes. **{len(in_place_rows)}** {ft_id}(s) in **{place_name.title()}** that mention **{', '.join(cap_keywords[:3])}**.")
+            pr("\nTop facilities (ranked by documentation quality):")
+            _print_ranked_list(pr, in_place_rows, "", limit=5, prefer_hospitals=(ft_id == "hospital"))
         else:
             pr(f"No {ft_id}s in **{place_name.title()}** in the dataset that list **{', '.join(cap_keywords[:3])}** in their capability/procedure/description.")
         pr(f"\n(Based on facilityTypeId, address_city/region, and content match.)")
@@ -868,15 +924,13 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
         else:
             filtered = rows
         in_place_rows = sort_rows_by_richness_then_similarity([r for r in filtered if in_place_city(r, place_name)], query)
-        unique_names = list(dict.fromkeys((r.get("name") or "Unknown").strip() for r in in_place_rows))
         ft_label = ft_id or facility_type or "facilities"
         pr("**Answer**")
         plural = "s" if len(in_place_rows) != 1 and (ft_label == "hospital" or ft_label == "clinic" or ft_label == "pharmacy") else ""
-        pr(f"**{len(in_place_rows)}** {ft_label}{plural} in **{place_name.title()}** (unique names: **{len(unique_names)}**).")
-        if unique_names:
-            pr("\nExamples:", ", ".join(unique_names[:20]))
-            if len(unique_names) > 20:
-                pr("... and", len(unique_names) - 20, "more.")
+        pr(f"**{len(in_place_rows)}** {ft_label}{plural} in **{place_name.title()}**.")
+        if in_place_rows:
+            pr("\nTop facilities (ranked by documentation quality):")
+            _print_ranked_list(pr, in_place_rows, "", limit=5, prefer_hospitals=(ft_label == "hospital"))
         pr(f"\n(Based on address_city and address_stateOrRegion.)")
         return
 
@@ -888,23 +942,21 @@ def _main_body(query: str, out: io.TextIOBase) -> None:
 
     # Per scheme: we look in specialties, procedure, equipment, capability, description
     matches = search_rows(rows, keywords, facility_type, query=query)
-    unique_names = list(dict.fromkeys((r.get("name") or "Unknown").strip() for r in matches))
 
     # Build answer using scheme terminology
     ft_label = f" with facilityTypeId = '{facility_type}'" if facility_type else ""
     pr("**Answer**")
     if facility_type:
-        pr(f"Count of facilities{ft_label} that mention '{' or '.join(keywords)}' in specialties, procedure, equipment, capability, or description: **{len(matches)}** (unique names: **{len(unique_names)}**).")
+        pr(f"Count of facilities{ft_label} that mention '{' or '.join(keywords)}' in specialties, procedure, equipment, capability, or description: **{len(matches)}**.")
     else:
-        pr(f"Count of facilities that mention '{' or '.join(keywords)}': **{len(matches)}** (unique names: **{len(unique_names)}**).")
-    if unique_names:
-        pr("\nExamples:", ", ".join(unique_names[:15]))
-        if len(unique_names) > 15:
-            pr("... and", len(unique_names) - 15, "more.")
+        pr(f"Count of facilities that mention '{' or '.join(keywords)}': **{len(matches)}**.")
+    if matches:
+        pr("\nTop facilities (ranked by documentation quality):")
+        _print_ranked_list(pr, matches, "", limit=5, prefer_hospitals=(facility_type == "hospital"))
 
     # Terminology from the scheme
     columns_used = ["specialties", "procedure", "equipment", "capability", "description", "facilityTypeId"]
-    pr("\n" + explain_relevant_terms(columns_used))
+    # Terminology block removed for cleaner user-facing responses
 
 
 def main():
