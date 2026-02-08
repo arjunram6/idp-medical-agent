@@ -12,7 +12,7 @@ An **Intelligent Document Parsing (IDP) agent** that goes beyond simple search: 
 ## Setup
 
 ```bash
-cd ~/Documents/idp-medical-agent
+cd ~/Documents/idp-medical-agent-full
 python -m venv .venv
 source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
@@ -48,6 +48,91 @@ python main.py --guided
 python main.py --trace "Which regions lack dialysis?"
 # Writes trace.json with step-level inputs/outputs and citation refs
 ```
+
+## API (Lovable / frontend)
+
+Run the API:
+
+```bash
+uvicorn api:app --reload --host 0.0.0.0 --port 8000
+```
+
+Base URL: `http://localhost:8000`
+
+### Health
+- `GET /api/health`
+- `GET /health` (legacy alias)
+
+### Query (single-turn)
+- `POST /api/query`
+- `POST /query` (legacy alias)
+
+Body:
+```json
+{ "query": "Which regions lack dialysis?" }
+```
+
+Response:
+```json
+{
+  "answer": "...",
+  "intent": "local_facility_query",
+  "sub_agent": "local_csv",
+  "used_medical_reasoning": false
+}
+```
+
+### Chat (single-turn, UI-friendly)
+- `POST /api/chat`
+
+Body:
+```json
+{ "message": "How many hospitals in Accra have emergency care?" }
+```
+
+Response:
+```json
+{
+  "reply": "...",
+  "intent": "local_facility_query",
+  "sub_agent": "local_csv"
+}
+```
+
+### Guided options
+- `GET /api/guided-options`
+
+Response:
+```json
+{ "options": [ { "id": "gaps", "label": "...", "short": "..." } ] }
+```
+
+### Guided query
+- `POST /api/guided-query`
+
+Body:
+```json
+{ "query": "Which regions lack dialysis?" }
+```
+
+### Regional capabilities summary
+- `GET /api/regions/summary`
+
+Response:
+```json
+{
+  "summary": { "by_region": { "Accra": { "facilities": [], "procedures": [] } } },
+  "regions_count": 16,
+  "total_procedures": 42,
+  "total_equipment": 28,
+  "total_capabilities": 31
+}
+```
+
+### Notes
+- Local CSV queries run without OpenAI.
+- RAG / Text-to-SQL / External Data / Medical Reasoning require `OPENAI_API_KEY`.
+- Geospatial queries use geocode API when available; run `python geocode_facilities.py` for full lat/lon coverage.
 
 ## Core features (MVP)
 

@@ -106,6 +106,15 @@ def classify_intent(query: str) -> SupervisorResult:
             "hint": "External data: outside Foundational Data Refresh; add to workspace or query in real time.",
         }
 
+    # Regional prominence / type of medicine (needs RAG synthesis + LLM, not just local filter)
+    if any(x in q for x in ("prominent", "type of medicine", "which medicine", "more common in", "what medicine", "what care", "specialties by region")):
+        return {
+            "intent": "rag_regional_prominence",
+            "sub_agent": "rag",
+            "confidence": "medium",
+            "hint": "RAG: regional synthesis + LLM for prominence / type of medicine by region.",
+        }
+
     # Local CSV: counts, locations, services, gaps, risk, unrealistic procedures
     try:
         from query_local import can_handle_locally

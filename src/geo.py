@@ -7,7 +7,7 @@ import math
 import re
 from typing import Callable
 
-# Reference points (lat, lon) for "within X km of <place>" queries
+# Reference points (lat, lon) for "within X km of <place>" queries (fallback only)
 PLACE_COORDS = {
     "accra": (5.6037, -0.1870),
     "kumasi": (6.6884, -1.6244),
@@ -15,6 +15,8 @@ PLACE_COORDS = {
     "takoradi": (4.8845, -1.7554),
     "cape coast": (5.1053, -1.2466),
 }
+
+_place_cache: dict[str, tuple[float, float] | None] = {}
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -34,9 +36,24 @@ geodesic_distance_km = haversine_km
 
 
 def get_place_coords(place: str) -> tuple[float, float] | None:
-    """Return (lat, lon) for a known place name, or None."""
-    key = place.strip().lower()
-    return PLACE_COORDS.get(key)
+    """Return (lat, lon) for a place name using geocode API, fallback to static map."""
+    key = (place or "").strip().lower()
+    if not key:
+        return None
+    if key in _place_cache:
+        return _place_cache[key]
+    try:
+        from src.geocode_maps import geocode_address
+        query = place.strip()
+        if "ghana" not in query.lower():
+            query = f"{query}, Ghana"
+        coords = geocode_address(query)
+    except Exception:
+        coords = None
+    if coords is None:
+        coords = PLACE_COORDS.get(key)
+    _place_cache[key] = coords
+    return coords
 
 
 def get_row_coords(row: dict) -> tuple[float, float] | None:

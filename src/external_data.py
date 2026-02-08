@@ -12,6 +12,7 @@ from src.config import DATA_DIR, PROJECT_ROOT
 EXTERNAL_SOURCES: list[dict[str, Any]] = [
     # Example: {"type": "csv", "path": PROJECT_ROOT / "data" / "external_supply.csv", "name": "supply"},
     # {"type": "url", "url": "https://example.com/api/facilities", "name": "live_api"},
+    {"type": "csv", "path": Path.home() / "Desktop" / "health_indicators_gha.csv", "name": "health_indicators_gha"},
 ]
 
 
