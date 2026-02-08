@@ -21,6 +21,9 @@ def should_use_medical_reasoning(query: str, intent: str, sub_agent: str) -> boo
         return True
     if any(x in q for x in ("where should i", "where can i go", "i'm pregnant", "i am pregnant", "need care", "recommend", "best place")):
         return True
+    # Regional medical prominence / specialties (use RAG + Medical Reasoning)
+    if any(x in q for x in ("prominent", "type of medicine", "which medicine", "specialties by region", "more common in", "what medicine", "what care")):
+        return True
     return False
 
 
