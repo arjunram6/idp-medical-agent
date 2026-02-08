@@ -10,6 +10,7 @@ dist/
 build/
 data/*.pdf
 data/*.csv
+!data/Virtue Foundation Ghana v0.3 - Sheet1.csv
 !data/.gitkeep
 storage/
 *.log
