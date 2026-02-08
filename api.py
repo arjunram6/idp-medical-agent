@@ -7,7 +7,9 @@ Then the frontend calls POST /api/query, POST /api/chat, GET /api/guided-options
 
 from __future__ import annotations
 
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,9 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.config import OPENAI_API_KEY
+
+API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "55"))
+PREBUILD_INDEX = os.getenv("PREBUILD_INDEX", "true").lower() in ("1", "true", "yes", "y")
 
 app = FastAPI(
     title="IDP Medical Agent API",
@@ -94,7 +99,36 @@ def _run_query(query: str) -> tuple[str, str | None, str | None, bool]:
     return answer, intent, sub_agent, use_med
 
 
+def _run_query_with_timeout(query: str, timeout_seconds: int = API_TIMEOUT_SECONDS):
+    """Run query with a timeout to avoid long-hanging requests."""
+    if timeout_seconds <= 0:
+        return _run_query(query)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_run_query, query)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except TimeoutError as e:
+            raise ValueError(f"Query timed out after {timeout_seconds}s.") from e
+
+
 # --- Endpoints ---
+
+@app.on_event("startup")
+def _startup() -> None:
+    """Prebuild vector index to avoid long first request."""
+    if not PREBUILD_INDEX:
+        return
+    try:
+        from src.config import STORAGE_DIR
+        from src.data.loaders import build_index, load_documents
+        try:
+            build_index(None, persist_dir=STORAGE_DIR)
+        except Exception:
+            docs = load_documents()
+            build_index(docs, persist_dir=STORAGE_DIR)
+    except Exception:
+        # Startup should not crash the server; query path can rebuild on demand
+        pass
 
 @app.get("/api/health")
 def health():
@@ -111,7 +145,7 @@ def health_legacy():
 def query(req: QueryRequest):
     """Single-shot question. Use this for one-off queries from your UI."""
     try:
-        answer, intent, sub_agent, use_med = _run_query(req.query)
+        answer, intent, sub_agent, use_med = _run_query_with_timeout(req.query)
         return QueryResponse(
             answer=answer,
             intent=intent,
@@ -133,7 +167,7 @@ def query_legacy(req: QueryRequest):
 def chat(req: ChatMessageRequest):
     """One chat turn. Frontend can send each user message here; optional session_id for server-side history (not required)."""
     try:
-        reply, intent, sub_agent, _ = _run_query(req.get_message())
+        reply, intent, sub_agent, _ = _run_query_with_timeout(req.get_message())
         return ChatMessageResponse(reply=reply, intent=intent, sub_agent=sub_agent)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
